@@ -1,0 +1,608 @@
+---
+title: "DGE Pipeline v1"
+output: html_document
+---
+
+```{r}
+
+# DESEQ2 pipeline
+
+# https://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html
+
+
+# EnhancedVolcano:
+
+# https://bioconductor.org/packages/devel/bioc/vignettes/EnhancedVolcano/inst/doc/EnhancedVolcano.html#adjust-colour-and-alpha-for-point-shading
+
+```
+
+#### Gene databases
+Kegg - https://www.genome.jp/kegg/genes.html
+GENCODE - https://www.gencodegenes.org/human/
+
+
+
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install(version='3.20', update = FALSE, ask = FALSE)
+
+BiocManager::install("DESeq2", update = FALSE, ask = FALSE)
+
+BiocManager::install('EnhancedVolcano', update = TRUE, ask = FALSE)
+```
+
+
+```{r}
+library(tidyverse)
+library(conflicted)
+library(data.table)
+
+library(EnhancedVolcano)
+
+library(DESeq2)
+
+conflicts_prefer(dplyr::filter())
+conflicts_prefer(base::intersect)
+```
+
+
+Load data from file
+```{r}
+
+# Load TE data
+TE_df <- read.table(file = 'esteban TE data/TE_99_allsamples_matrix.tsv', sep = '\t', header = TRUE)
+head(TE_df)
+
+# Fixing TE_df
+ncol(TE_df)
+colnames(TE_df)[2:length(TE_df)]
+
+rownames(TE_df) <- TE_df$TE_ID
+TE_df <- TE_df[,2:ncol(TE_df)]
+
+# Load participants
+participant_data <-  read.table(file = 'esteban TE data/phenotypeStarting_BB.tsv', sep = '\t', header = TRUE)
+head(participant_data)
+
+# Fixing participant_data
+nrow(participant_data)
+rownames(participant_data) <- participant_data$Individual
+
+rownames(participant_data)
+
+participant_data <- participant_data[,3:ncol(participant_data)]
+
+
+colnames_TEdf <- substr(colnames(TE_df), 1, nchar(colnames(TE_df)) - 4)
+
+rownames_participants <- rownames(participant_data)
+
+common_samples <- intersect(colnames_TEdf, rownames_participants)
+missing_samples <- base::setdiff(colnames_TEdf, common_samples)
+
+# Recode column names in TE_df
+TE_df_columns_shortened <- TE_df
+colnames(TE_df_columns_shortened) <- substr(colnames(TE_df_columns_shortened), 1, nchar(colnames(TE_df_columns_shortened)) - 4)
+
+# Filter TE_df to keep only columns that are present in participant_data
+TE_df_filtered <- TE_df_columns_shortened %>% select(any_of(common_samples))
+participant_data_filtered <- participant_data[rownames(participant_data) %in% common_samples, ]
+
+# Change all data types in matrix to integers:
+TE_df_filtered <- TE_df_filtered %>%
+  mutate(across(where(is.numeric), as.integer))
+
+# Convert 'Status' (disease status) to a factor:
+participant_data_filtered$Status <- factor(participant_data_filtered$Status, levels = c(1, 2))
+
+
+```
+
+Load additional data to cover phenotypes
+```{r}
+# Load in additional data to cover missing participant info
+phenotype_added <- read.csv('esteban TE data/phenoinfo_omicsBB (1) 1.csv')
+
+rownames(phenotype_added) <- phenotype_added$Sample_Name
+
+all_participants_ids <- c(rownames(participant_data), rownames(phenotype_added))
+
+length(all_participants_ids) #330
+unique(all_participants_ids) %>% length() #175
+# original number of observations: 176
+
+intersect(all_participants_ids, colnames(TE_df_columns_shortened)) %>% length()
+
+
+```
+
+Make deseq matrix
+```{r}
+Deseq_matrix <- DESeqDataSetFromMatrix(countData=TE_df_filtered, 
+                              colData=participant_data_filtered, 
+                              design=~Status)
+
+```
+
+Run deseq, save results
+```{r}
+
+# Displaying some results
+
+dds <- DESeq(Deseq_matrix)
+
+resultsNames(dds)
+
+res <- results(dds, alpha = 0.05)
+
+```
+
+
+# Splice out gene annotation into more columns
+```{r}
+
+splice_list <- rownames(res) %>% strsplit(., "\\|")
+# splice_list %>% head(2)
+
+res$chromosome <- sapply(splice_list, `[`, 1)
+res$start_chord <- sapply(splice_list, `[`, 2)
+res$end_chord <- sapply(splice_list, `[`, 3)
+
+res$TE_annotation <- sapply(splice_list, `[`, 4)
+
+te_anno_list <- strsplit(res$TE_annotation, ":")
+
+res$TE_name   <- sapply(te_anno_list, `[`, 1)
+res$TE_family <- sapply(te_anno_list, `[`, 2)
+res$TE_class  <- sapply(te_anno_list, `[`, 3)
+
+
+res$te_length <- sapply(splice_list, `[`, 5)
+res$strand_orientation <- sapply(splice_list, `[`, 6)
+
+# res %>% view()
+
+```
+
+# Summary of results:
+```{r}
+summary(res)
+```
+
+Plot of significant genes
+```{r}
+plotMA(res, ylim=c(-5,5))
+
+EnhancedVolcano(res,
+                lab = res$TE_ID,
+                x = 'log2FoldChange',
+                y = 'padj',
+                pCutoff = 0.05,
+                FCcutoff = 1.5,
+                title = 'Differential Expression of TEs in ALS',
+                subtitle = 'DESeq2 results',
+                caption = 'TEs colored by log2FC and padj',
+                legendPosition = 'right')
+
+```
+
+```{r}
+
+res$significance_boolean <- (!is.na(res$padj) & res$padj < 0.05 & abs(res$log2FoldChange) >= 0.58)
+
+sig <- res[res$significance_boolean==1, ]
+
+nrow(sig)
+
+```
+```{r}
+mean_norm_vals <- plotMA(sig, ylim=c(-2,2), xlab = "Mean of normalised count values")
+
+main_volcano <- EnhancedVolcano(sig,
+                lab = '',
+                x = 'log2FoldChange',
+                y = 'padj',
+                pCutoff = 0.05,
+                FCcutoff = 0.58,
+                pointSize = 1.5,
+                title = '',
+                subtitle = 'Differential expression of TEs in ALS',
+                caption = 'TEs colored by log2FC and padj',
+                legendPosition = 'right',
+                xlim = c(-1,1),
+                ylim = c(0, 8))
+
+summary_counts <- res %>%
+  as.data.frame() %>%
+  mutate(Direction = ifelse(log2FoldChange >= 0, "Upregulated", "Downregulated")) %>%
+  group_by(Direction) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  mutate(Direction = factor(Direction, levels = c("Downregulated", "Upregulated")))
+
+# Add a single x for a stacked bar
+summary_counts$x <- "all"
+
+# Calculate percentages for 100% bar
+summary_counts <- summary_counts %>%
+  mutate(pct = count / sum(count) * 100)
+
+# Create pie chart
+p <- ggplot(summary_counts, aes(x = "", y = count, fill = Direction)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y") +  # Convert to pie chart
+  scale_fill_manual(values = c("Downregulated" = "violetred2", "Upregulated" = "royalblue1"),
+                    name = "Direction:") +
+  labs(
+    title = "Proportion of upregulated and downregulated genes",
+    subtitle = paste0("Total significant genes (FDR corrected p < 0.05): ", sum(summary_counts$count)),
+    x = NULL,
+    y = NULL
+  ) +
+  theme_void() +  # Clean theme for pie charts
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    legend.position = "bottom"
+  ) +
+  # Add count and percentage labels
+  geom_text(aes(label = paste0(count, "\n(", round(pct, 1), "%)")), 
+            position = position_stack(vjust = 0.5),
+            color = "white", 
+            fontface = "bold",
+            size = 4)
+
+summary_counts_sig <- sig %>%
+  as.data.frame() %>%
+  mutate(Direction = ifelse(log2FoldChange >= 0, "Upregulated", "Downregulated")) %>%
+  group_by(Direction) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  mutate(Direction = factor(Direction, levels = c("Downregulated", "Upregulated")))
+
+summary_counts_sig <- summary_counts_sig %>%
+  mutate(pct = count / sum(count) * 100)
+
+p_sig <- ggplot(summary_counts_sig, aes(x = "", y = count, fill = Direction)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y") +  # Convert to pie chart
+  scale_fill_manual(values = c("Downregulated" = "violetred2", "Upregulated" = "royalblue1"),
+                    name = "Direction:") +
+  labs(
+    title = "Proportion of upregulated and downregulated genes",
+    subtitle = paste0("Total significant genes (FDR corrected p < 0.05) with log2fold change > 0.58: ", sum(summary_counts$count)),
+    x = NULL,
+    y = NULL
+  ) +
+  theme_void() +  # Clean theme for pie charts
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    legend.position = "bottom"
+  ) +
+  # Add count and percentage labels
+  geom_text(aes(label = paste0(count, "\n(", round(pct, 1), "%)")), 
+            position = position_stack(vjust = 0.5),
+            color = "white", 
+            fontface = "bold",
+            size = 4)
+
+
+print(mean_norm_vals)
+print(main_volcano)
+p
+p_sig
+
+
+```
+```{r}
+
+# 1. Save the plotMA plot (base plot)
+png(filename = "plots/main/mean_norm_vals.png", width = 1200, height = 800, res = 150)
+plotMA(res, ylim=c(-2,2), xlab = "Mean of normalised count values")
+dev.off()
+
+# 2. Save the EnhancedVolcano plot
+png(filename = "plots/main/main_volcano.png", width = 3500, height = 2000, res = 150)
+special_df <- res %>% as.data.frame() %>% mutate(TE_class_special = ifelse(log2FoldChange > 0, paste0(TE_class, ': ', TE_name), ''))
+
+  keyvals <- ifelse(
+    res$log2FoldChange < -0.58 & res$padj < 0.05, 'violetred2',
+      ifelse(res$log2FoldChange > 0.58 & res$padj < 0.05, 'royalblue1',
+        'black'))
+  keyvals[is.na(keyvals)] <- 'black'
+  names(keyvals)[keyvals == 'violetred2'] <- 'Downregulated'
+  names(keyvals)[keyvals == 'black'] <- 'Not significantly altered'
+  names(keyvals)[keyvals == 'royalblue1'] <- 'Upregulated'
+
+alpha <- ifelse(
+    res$log2FoldChange < -0.58, 0.8,
+      ifelse(res$log2FoldChange > 0.58, 0.8,
+        'black'))
+  keyvals[is.na(keyvals)] <- 0.4
+
+
+main_volcano <- EnhancedVolcano(special_df,
+                lab = '',
+                x = 'log2FoldChange',
+                y = 'padj',
+                pCutoff = 0.05,
+                FCcutoff = 0.58,
+                pointSize = 6,
+                colCustom = keyvals,
+                colAlpha = 0.8,
+                title = '',
+                subtitle = 'Differential expression of TEs in ALS',
+                caption = 'TEs colored by log2FC and padj',
+                legendPosition = 'right',
+                xlim = c(-1,1),
+                ylim = c(0, 8))
+
+print(main_volcano)
+dev.off()
+
+
+ggsave("plots/main/piechart_p.png", plot = p, width = 8, height = 4, dpi = 150)
+
+ggsave("plots/main/piechart_p_logfold.png", plot = p_sig, width = 8, height = 4, dpi = 150)
+```
+```{r}
+splice_list <- rownames(res) %>% strsplit(., "\\|")
+# splice_list %>% head(2)
+
+res$chromosome <- sapply(splice_list, `[`, 1)
+res$start_chord <- sapply(splice_list, `[`, 2)
+res$end_chord <- sapply(splice_list, `[`, 3)
+
+res$TE_annotation <- sapply(splice_list, `[`, 4)
+
+te_anno_list <- strsplit(res$TE_annotation, ":")
+
+res$TE_name   <- sapply(te_anno_list, `[`, 1)
+res$TE_family <- sapply(te_anno_list, `[`, 2)
+res$TE_class  <- sapply(te_anno_list, `[`, 3)
+
+
+res$te_length <- sapply(splice_list, `[`, 5)
+res$strand_orientation <- sapply(splice_list, `[`, 6)
+```
+
+
+
+```{r}
+
+res_df <- res %>% as.data.frame()
+
+upreg <- res_df %>% filter(log2FoldChange > 0.58 & padj < 0.05)
+nrow(upreg)
+
+downreg <- res_df %>% filter(log2FoldChange < -0.58 & padj < 0.05)
+
+upreg
+downreg
+
+
+
+
+
+```
+
+```{r}
+
+sig <- upreg
+
+colnames(sig)
+
+get_cols <- c("TE_annotation", "TE_class", "TE_family", "TE_name", "log2FoldChange", "pvalue", "padj", "start_chord", "end_chord", "chromosome")
+
+sig_reduced_cols <- sig[get_cols] %>% as.data.frame()
+
+rownames(sig_reduced_cols) <- seq(1, nrow(sig_reduced_cols))
+
+colnames(sig_reduced_cols) <- c(
+  "Transposable Element Annotation",
+  "Transposable Element Class",
+  "Transposable Element Family",
+  "Transposable Element Name",
+  "Log2 Fold Change (Treatment vs Control)",
+  "P-value",
+  "Adjusted P-value (FDR)",
+  "Start coordinate",
+  "End coordinate",
+  "Chromosome"
+)
+
+
+options(scipen = 999)  # turns off scientific notation globally
+sig_reduced_cols$`P-value` <- round(sig_reduced_cols$`P-value`, 6)
+sig_reduced_cols$`Adjusted P-value` <- round(sig_reduced_cols$`Adjusted P-value`, 6)
+
+sig_reduced_cols <- sig_reduced_cols %>%
+  mutate("Significance (FDR corrected)" = case_when(
+    `Adjusted P-value` < 0.001 ~ "***",  # highly significant
+    `Adjusted P-value` < 0.01  ~ "**",   # moderately significant
+    `Adjusted P-value` < 0.05  ~ "*",    # significant
+    TRUE                       ~ ""      # not significant
+  ))
+
+
+colnames(sig_reduced_cols)
+
+sig_reduced_cols <- sig_reduced_cols %>%
+  select(
+    `Transposable Element Class`,
+    `Transposable Element Family`,
+    `Transposable Element Name`,
+    `Log2 Fold Change (Treatment vs Control)`,
+    `P-value`,
+    `Adjusted P-value`,
+    `Significance (FDR corrected)`,
+    `Start coordinate`,
+    `End coordinate`,
+    `Chromosome`
+  )
+
+sig_reduced_cols
+
+writexl::write_xlsx(sig_reduced_cols, path = 'xlsx tables/upreg TEs.xlsx')
+
+```
+
+
+```{r}
+
+sig <- downreg
+
+
+colnames(sig)
+
+get_cols <- c("TE_annotation", "TE_class", "TE_family", "TE_name", "log2FoldChange", "pvalue", "padj", "start_chord", "end_chord", "chromosome")
+
+sig_reduced_cols <- sig[get_cols] %>% as.data.frame()
+
+rownames(sig_reduced_cols) <- seq(1, nrow(sig_reduced_cols))
+
+colnames(sig_reduced_cols) <- c(
+  "Transposable Element Annotation",
+  "Transposable Element Class",
+  "Transposable Element Family",
+  "Transposable Element Name",
+  "Log2 Fold Change (Treatment vs Control)",
+  "P-value",
+  "Adjusted P-value (FDR)",
+  "Start coordinate",
+  "End coordinate",
+  "Chromosome"
+)
+
+
+options(scipen = 999)  # turns off scientific notation globally
+sig_reduced_cols$`P-value` <- round(sig_reduced_cols$`P-value`, 6)
+sig_reduced_cols$`Adjusted P-value` <- round(sig_reduced_cols$`Adjusted P-value`, 6)
+
+sig_reduced_cols <- sig_reduced_cols %>%
+  mutate("Significance (FDR corrected)" = case_when(
+    `Adjusted P-value` < 0.001 ~ "***",  # highly significant
+    `Adjusted P-value` < 0.01  ~ "**",   # moderately significant
+    `Adjusted P-value` < 0.05  ~ "*",    # significant
+    TRUE                       ~ ""      # not significant
+  ))
+
+
+colnames(sig_reduced_cols)
+
+sig_reduced_cols <- sig_reduced_cols %>%
+  select(
+    `Transposable Element Class`,
+    `Transposable Element Family`,
+    `Transposable Element Name`,
+    `Log2 Fold Change (Treatment vs Control)`,
+    `P-value`,
+    `Adjusted P-value`,
+    `Significance (FDR corrected)`,
+    `Start coordinate`,
+    `End coordinate`,
+    `Chromosome`
+  )
+
+
+writexl::write_xlsx(sig_reduced_cols, path = 'xlsx tables/downreg TEs.xlsx')
+
+```
+
+```{r}
+# Add direction column (up/downregulated)
+sig_counts <- as.data.frame(sig) %>%
+  mutate(direction = ifelse(log2FoldChange > 0, "Upregulated", "Downregulated"))  %>% as.data.frame()
+
+unique(sig_counts$TE_class) %>% length()
+unique(sig_counts$TE_family)  %>% length()
+unique(sig_counts$TE_name)  %>% length()
+
+TE_class_arranged <- sig_counts %>% group_by(TE_class) %>% summarise(count = n()) %>% arrange(desc(count))
+TE_class_and_family_arranged <- sig_counts %>% group_by(TE_class, TE_family) %>% summarise(count = n()) %>% arrange(desc(count))
+
+print(TE_class_arranged)
+print(TE_class_and_family_arranged)
+
+
+png(filename = "plots/TE breakdown/TE_family_boxplots.png", width = 1500, height = 1000, res = 400)
+
+# Filter for the TE families of interest
+te_subset <- sig_counts %>%
+  filter(TE_family %in% c("L2", "L1", "MIR", "CR1", "Alu", "ERVL-MaLR")) %>%
+  mutate(special = ifelse(log2FoldChange>0.58 & padj < 0.05, 'Positive upregualted', ''))
+
+# Summarize means and sds of log2FoldChange by family
+summary_by_family <- te_subset %>%
+  group_by(TE_family) %>%
+  summarise(
+    mean_log2fc = mean(log2FoldChange, na.rm = TRUE),
+    sd_log2fc = sd(log2FoldChange, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+png(filename = "plots/TE breakdown/TE_family_boxplots_by_direction.png", width = 1500, height = 1000, res = 400)
+
+# Filter for the TE families of interest
+te_subset <- sig_counts %>%
+  filter(TE_family %in% c("L2", "L1", "MIR", "CR1", "Gypsy", "Alu", "ERVL-MaLR")) %>% 
+  mutate(log2FoldChange = abs(log2FoldChange)) %>% 
+  complete(TE_family, direction) 
+
+# Plot boxplots of log2FoldChange by TE_family and direction
+ggplot(te_subset, aes(x = factor(TE_family, 
+                                 levels = c("L1", "L2", "MIR", "CR1", "Gypsy", "Alu", "ERVL-MaLR")), 
+                      y = log2FoldChange, fill = direction)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, position = position_dodge(width = 0.8)) +
+  scale_fill_manual(
+    values = c("Upregulated" = "royalblue1", 
+               "Downregulated" = "violetred2", 
+               "Not significantly altered" = "black")
+  ) +
+  xlab("TE family") +
+  ylab("log2(Fold Change)") +
+  theme_minimal(base_size = 12)
+
+dev.off()
+# =====================================
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+# Define TE families and directions
+TE_families <- c("L2", "L1", "MIR", "CR1", "Gypsy", "Alu", "ERVL-MaLR")
+directions <- c("Upregulated", "Downregulated", "Not significantly altered")
+
+# Filter and add dummy rows if combinations are missing
+plot_data <- sig_counts %>%
+  filter(TE_family %in% TE_families) %>%
+  complete(
+    TE_family = TE_families,
+    direction = directions,
+    fill = list(log2FoldChange = NA)
+  )
+
+# Plot boxplots with absolute values
+ggplot(plot_data, aes(x = TE_family, y = abs(log2FoldChange), fill = direction)) +
+  geom_boxplot(position = position_dodge(width = 0.8), outlier.shape = NA, na.rm = TRUE) +
+  scale_fill_manual(
+    values = c(
+      "Upregulated" = "royalblue1",
+      "Downregulated" = "violetred2",
+      "Not significantly altered" = "black"
+    )
+  ) +
+  xlab("TE Family") +
+  ylab("Absolute log2 Fold Change") +
+  theme_minimal()
+
+
+
+
+```
+
+
+
+
+
